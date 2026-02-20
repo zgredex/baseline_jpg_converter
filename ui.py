@@ -97,40 +97,74 @@ class BaselineJPGAction(InterfaceAction):
     
     def ensure_cover_meta(self, opf_content):
         """
-        Ensure OPF has <meta name="cover" content="X"/> pointing to cover image.
-        This is required by many e-readers including CrossPoint.
+        Ensure OPF has correct <meta name="cover" content="X"/> pointing to cover image ID.
+        Also fixes incorrect values (path instead of ID).
         Returns (modified_content, was_modified).
         """
         import re
         
-        # Check if already has cover meta
-        if '<meta name="cover"' in opf_content:
-            return opf_content, False
-        
-        # Find cover image id from manifest (look for cover-image property or cover in id/href)
+        # Find cover image id from manifest
         cover_id = None
         
-        # First try: find item with properties="cover-image"
+        # Try 1: find item with properties="cover-image"
         match = re.search(r'<item[^>]+id="([^"]+)"[^>]+properties="[^"]*cover-image[^"]*"', opf_content)
         if match:
             cover_id = match.group(1)
         
-        # Second try: find item with properties before id
         if not cover_id:
             match = re.search(r'<item[^>]+properties="[^"]*cover-image[^"]*"[^>]+id="([^"]+)"', opf_content)
             if match:
                 cover_id = match.group(1)
         
-        # Third try: find item with "cover" in id and image media-type
+        # Try 2: find item with "cover" in href and image media-type
+        if not cover_id:
+            match = re.search(r'<item[^>]+id="([^"]+)"[^>]+href="[^"]*cover[^"]*"[^>]*media-type="image/', opf_content, re.IGNORECASE)
+            if match:
+                cover_id = match.group(1)
+        
+        if not cover_id:
+            match = re.search(r'<item[^>]+href="[^"]*cover[^"]*"[^>]+id="([^"]+)"[^>]*media-type="image/', opf_content, re.IGNORECASE)
+            if match:
+                cover_id = match.group(1)
+        
+        # Try 3: find item with "cover" in id and image media-type
         if not cover_id:
             match = re.search(r'<item[^>]+id="([^"]*cover[^"]*)"[^>]+media-type="image/', opf_content, re.IGNORECASE)
             if match:
                 cover_id = match.group(1)
         
         if not cover_id:
+            match = re.search(r'<item[^>]+media-type="image/[^"]*"[^>]+id="([^"]*cover[^"]*)"', opf_content, re.IGNORECASE)
+            if match:
+                cover_id = match.group(1)
+        
+        if not cover_id:
             return opf_content, False
         
-        # Add meta tag before </metadata>
+        # Check if cover meta exists
+        meta_match = re.search(r'<meta\s+name=["\']cover["\']\s+content=["\']([^"\']+)["\']', opf_content)
+        if meta_match:
+            current_value = meta_match.group(1)
+            # If value contains path separator, it's wrong - should be ID only
+            if '/' in current_value:
+                # Replace with correct ID
+                opf_content = re.sub(
+                    r'<meta\s+name=["\']cover["\']\s+content=["\'][^"\']+["\']\s*/?>',
+                    f'<meta name="cover" content="{cover_id}" />',
+                    opf_content
+                )
+                return opf_content, True
+            # If value doesn't match the cover ID we found, fix it
+            if current_value != cover_id:
+                opf_content = re.sub(
+                    r'<meta\s+name=["\']cover["\']\s+content=["\'][^"\']+["\']\s*/?>',
+                    f'<meta name="cover" content="{cover_id}" />',
+                    opf_content
+                )
+                return opf_content, True
+            return opf_content, False  # Already has valid cover meta
+        
+        # Add missing cover meta
         new_meta = f'    <meta name="cover" content="{cover_id}"/>\n  </metadata>'
         opf_content = opf_content.replace('</metadata>', new_meta)
         
@@ -154,6 +188,8 @@ class BaselineJPGAction(InterfaceAction):
         try:
             with zipfile.ZipFile(epub_path, 'r') as zin:
                 for item in zin.infolist():
+                    if item.is_dir():  # Skip directory entries
+                        continue
                     lower_name = item.filename.lower()
                     if lower_name.endswith(('.png', '.gif', '.webp', '.bmp')):
                         base_name = item.filename.rsplit('.', 1)[0]
@@ -162,6 +198,8 @@ class BaselineJPGAction(InterfaceAction):
                 
                 with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zout:
                     for item in zin.infolist():
+                        if item.is_dir():  # Skip directory entries - EPUB readers don't need them
+                            continue
                         data = zin.read(item.filename)
                         filename = item.filename
                         lower_name = filename.lower()
